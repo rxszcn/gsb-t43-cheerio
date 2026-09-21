@@ -111,18 +111,31 @@ function setCss(
   idx: number,
 ) {
   if (typeof prop === 'string') {
-    const styles = getCss(el);
-
     const val =
-      typeof value === 'function' ? value.call(el, idx, styles[prop]) : value;
+      typeof value === 'function' ? value.call(el, idx, getCss(el, prop)) : value;
+
+    const styles = parse(el.attribs['style']);
+    const normalized = normalizePropName(prop);
 
     if (val === '') {
-      delete styles[prop];
+      const remaining = styles.filter(
+        (decl) => normalizePropName(decl.name) !== normalized,
+      );
+      if (remaining.length !== styles.length) {
+        el.attribs['style'] = stringify(remaining);
+      }
     } else if (val != null) {
-      styles[prop] = val;
+      const existing = styles.findLast(
+        (decl) => normalizePropName(decl.name) === normalized,
+      );
+      if (existing) {
+        // Update the declaration in place, keeping the authored spelling.
+        existing.value = val;
+      } else {
+        styles.push({ name: prop, value: val });
+      }
+      el.attribs['style'] = stringify(styles);
     }
-
-    el.attribs['style'] = stringify(styles);
   } else if (typeof prop === 'object') {
     const keys = Object.keys(prop);
     for (let i = 0; i < keys.length; i++) {
@@ -160,33 +173,80 @@ function getCss(
 
   const styles = parse(el.attribs['style']);
   if (typeof prop === 'string') {
-    return styles[prop];
+    const normalized = normalizePropName(prop);
+    let result: string | undefined;
+    for (const decl of styles) {
+      if (normalizePropName(decl.name) === normalized) {
+        result = decl.value;
+      }
+    }
+    return result;
   }
   if (Array.isArray(prop)) {
     const newStyles: Record<string, string> = {};
     for (const item of prop) {
-      if (styles[item] != null) {
-        newStyles[item] = styles[item];
+      const value = getCss(el, item);
+      if (value != null) {
+        newStyles[item] = value;
       }
     }
     return newStyles;
   }
-  return styles;
+  const obj: Record<string, string> = {};
+  for (const decl of styles) {
+    obj[decl.name] = decl.value;
+  }
+  return obj;
 }
 
 /**
- * Stringify `obj` to styles.
+ * A single style declaration, keeping the name exactly as authored.
+ *
+ * @private
+ */
+interface StyleDeclaration {
+  name: string;
+  value: string;
+}
+
+/**
+ * Vendor prefixes that may be written without the leading dash in camelCase
+ * form (e.g. `webkitTransform` for `-webkit-transform`).
+ *
+ * @private
+ */
+const VENDOR_PREFIX = /^(webkit|moz|ms|o)-/;
+
+/**
+ * Normalize a property name so that the camelCase, kebab-case and
+ * case-insensitive spellings of the same declaration compare equal. Custom
+ * properties (`--*`) are kept as-is: their hyphens are part of the name.
+ *
+ * @private
+ * @param name - The property name to normalize.
+ * @returns The normalized property name.
+ */
+function normalizePropName(name: string): string {
+  if (name.startsWith('--')) return name;
+  let normalized = name.includes('-')
+    ? name.toLowerCase()
+    : name.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`);
+  if (!normalized.startsWith('-') && VENDOR_PREFIX.test(normalized)) {
+    normalized = `-${normalized}`;
+  }
+  return normalized;
+}
+
+/**
+ * Stringify `decls` to styles.
  *
  * @private
  * @category CSS
- * @param obj - Object to stringify.
+ * @param decls - Declarations to stringify.
  * @returns The serialized styles.
  */
-function stringify(obj: Record<string, string>): string {
-  return Object.keys(obj).reduce(
-    (str, prop) => `${str}${str ? ' ' : ''}${prop}: ${obj[prop]};`,
-    '',
-  );
+function stringify(decls: StyleDeclaration[]): string {
+  return decls.map((decl) => `${decl.name}: ${decl.value};`).join(' ');
 }
 
 /**
@@ -195,30 +255,30 @@ function stringify(obj: Record<string, string>): string {
  * @private
  * @category CSS
  * @param styles - Styles to be parsed.
- * @returns The parsed styles.
+ * @returns The parsed declarations, in document order.
  */
-function parse(styles: string): Record<string, string> {
+function parse(styles: string): StyleDeclaration[] {
   styles = (styles || '').trim();
 
-  if (!styles) return {};
+  if (!styles) return [];
 
-  const obj: Record<string, string> = {};
-
-  let key: string | undefined;
+  const decls: StyleDeclaration[] = [];
 
   for (const str of styles.split(';')) {
     const n = str.indexOf(':');
     // If there is no :, or if it is the first/last character, add to the previous item's value
     if (n < 1 || n === str.length - 1) {
       const trimmed = str.trimEnd();
-      if (trimmed.length > 0 && key !== undefined) {
-        obj[key] += `;${trimmed}`;
+      if (trimmed.length > 0 && decls.length > 0) {
+        decls[decls.length - 1].value += `;${trimmed}`;
       }
     } else {
-      key = str.slice(0, n).trim();
-      obj[key] = str.slice(n + 1).trim();
+      decls.push({
+        name: str.slice(0, n).trim(),
+        value: str.slice(n + 1).trim(),
+      });
     }
   }
 
-  return obj;
+  return decls;
 }
