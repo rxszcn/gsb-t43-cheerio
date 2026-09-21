@@ -111,15 +111,23 @@ function setCss(
   idx: number,
 ) {
   if (typeof prop === 'string') {
-    const styles = getCss(el);
+    const styles = parse(el.attribs['style']);
+    const key = normalizeName(prop);
+    const existing = styles.find((decl) => decl.key === key);
 
     const val =
-      typeof value === 'function' ? value.call(el, idx, styles[prop]) : value;
+      typeof value === 'function'
+        ? value.call(el, idx, existing?.value as string)
+        : value;
 
     if (val === '') {
-      delete styles[prop];
+      if (existing) styles.splice(styles.indexOf(existing), 1);
     } else if (val != null) {
-      styles[prop] = val;
+      if (existing) {
+        existing.value = val;
+      } else {
+        styles.push({ name: prop, value: val, key });
+      }
     }
 
     el.attribs['style'] = stringify(styles);
@@ -160,33 +168,77 @@ function getCss(
 
   const styles = parse(el.attribs['style']);
   if (typeof prop === 'string') {
-    return styles[prop];
+    const key = normalizeName(prop);
+    return styles.find((decl) => decl.key === key)?.value;
   }
   if (Array.isArray(prop)) {
     const newStyles: Record<string, string> = {};
     for (const item of prop) {
-      if (styles[item] != null) {
-        newStyles[item] = styles[item];
+      const key = normalizeName(item);
+      const decl = styles.find((d) => d.key === key);
+      if (decl) {
+        newStyles[item] = decl.value;
       }
     }
     return newStyles;
   }
-  return styles;
+  const allStyles: Record<string, string> = {};
+  for (const decl of styles) {
+    allStyles[decl.name] = decl.value;
+  }
+  return allStyles;
 }
 
 /**
- * Stringify `obj` to styles.
+ * A single style declaration, keeping the spelling it was written with.
  *
  * @private
  * @category CSS
- * @param obj - Object to stringify.
+ */
+interface StyleDecl {
+  /** The property name, as written. */
+  name: string;
+  /** The declaration value. */
+  value: string;
+  /** The normalized property name, used to match alternate spellings. */
+  key: string;
+}
+
+/** Vendor prefixes that may be written without a leading dash in camelCase. */
+const VENDOR_PREFIXES = ['webkit', 'moz', 'ms', 'o'];
+
+/**
+ * Normalize a property name so that the kebab-case, camelCase and uppercase
+ * spellings of the same declaration compare equal. Custom properties (`--*`)
+ * are case-sensitive and keep their exact name.
+ *
+ * @private
+ * @category CSS
+ * @param name - Property name to normalize.
+ * @returns The normalized name.
+ */
+function normalizeName(name: string): string {
+  if (name.startsWith('--')) return name;
+
+  const kebab = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+
+  for (const prefix of VENDOR_PREFIXES) {
+    if (kebab.startsWith(`${prefix}-`)) return `-${kebab}`;
+  }
+
+  return kebab;
+}
+
+/**
+ * Stringify `decls` to styles.
+ *
+ * @private
+ * @category CSS
+ * @param decls - Declarations to stringify.
  * @returns The serialized styles.
  */
-function stringify(obj: Record<string, string>): string {
-  return Object.keys(obj).reduce(
-    (str, prop) => `${str}${str ? ' ' : ''}${prop}: ${obj[prop]};`,
-    '',
-  );
+function stringify(decls: StyleDecl[]): string {
+  return decls.map((decl) => `${decl.name}: ${decl.value};`).join(' ');
 }
 
 /**
@@ -195,30 +247,42 @@ function stringify(obj: Record<string, string>): string {
  * @private
  * @category CSS
  * @param styles - Styles to be parsed.
- * @returns The parsed styles.
+ * @returns The parsed declarations, in order.
  */
-function parse(styles: string): Record<string, string> {
+function parse(styles: string): StyleDecl[] {
   styles = (styles || '').trim();
 
-  if (!styles) return {};
+  if (!styles) return [];
 
-  const obj: Record<string, string> = {};
+  const decls: StyleDecl[] = [];
+  const byKey = new Map<string, StyleDecl>();
 
-  let key: string | undefined;
+  let current: StyleDecl | undefined;
 
   for (const str of styles.split(';')) {
     const n = str.indexOf(':');
     // If there is no :, or if it is the first/last character, add to the previous item's value
     if (n < 1 || n === str.length - 1) {
       const trimmed = str.trimEnd();
-      if (trimmed.length > 0 && key !== undefined) {
-        obj[key] += `;${trimmed}`;
+      if (trimmed.length > 0 && current !== undefined) {
+        current.value += `;${trimmed}`;
       }
     } else {
-      key = str.slice(0, n).trim();
-      obj[key] = str.slice(n + 1).trim();
+      const name = str.slice(0, n).trim();
+      const value = str.slice(n + 1).trim();
+      const key = normalizeName(name);
+      const existing = byKey.get(key);
+      if (existing) {
+        // Last write wins; the declaration keeps its spelling and position.
+        existing.value = value;
+        current = existing;
+      } else {
+        current = { name, value, key };
+        byKey.set(key, current);
+        decls.push(current);
+      }
     }
   }
 
-  return obj;
+  return decls;
 }
